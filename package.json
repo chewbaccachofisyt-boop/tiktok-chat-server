@@ -2,9 +2,9 @@
   "name": "tiktok-live-chat-server",
   "version": "1.0.0",
   "description": "Servidor backend para leer chat de TikTok Live",
-  "main": "servidor-tiktok.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node servidor-tiktok.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
