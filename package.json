@@ -13,32 +13,3 @@
     "tiktok-live-connector": "^1.1.8"
   }
 }
-```
-
-3. Baja y haz clic en el botón verde **"Commit new file"**
-
-4. **Segundo archivo - servidor-tiktok.js:**
-   - Ahora estarás en la página principal del repo
-   - Arriba a la derecha verás un botón **"Add file"**
-   - Haz clic y selecciona **"Create new file"**
-   - Nombre: `servidor-tiktok.js`
-   - Pega el código completo del servidor (el del artifact)
-   - Haz clic en **"Commit new file"**
-
----
-
-### **Opción 2: Subir archivos** (SI YA LOS TIENES EN TU PC)
-
-1. Haz clic en **"uploading an existing file"** (también está en "Quick setup")
-2. Arrastra los archivos o haz clic para seleccionarlos
-3. Haz clic en **"Commit changes"**
-
----
-
-## ✅ **Una vez que tengas los 2 archivos:**
-
-Tu repositorio debe verse así:
-```
-tiktok-chat-server/
-├── package.json
-└── servidor-tiktok.js
