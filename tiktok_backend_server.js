@@ -1,292 +1,296 @@
-// servidor-tiktok.js
-// Servidor Backend para conectar con TikTok Live
+// tiktok_backend_server.js
+// Servidor Backend para conectar con TikTok Live (compatible con Render + Socket.IO)
 
 const express = require('express');
 const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
 const { WebcastPushConnection } = require('tiktok-live-connector');
-const app = express();
-const http = require('http').createServer(app);
-const io = require('socket.io')(http, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
-});
 
-// Configuración
-const PORT = process.env.PORT || 3000;
+const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Almacenar conexiones activas
+// ---- Servidor HTTP + Socket.IO (clave para Render) ----
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: {
+    origin: '*',           // si quieres, cámbialo por tu dominio estático
+    methods: ['GET', 'POST']
+  },
+  transports: ['websocket', 'polling'] // Render a veces usa polling de fallback
+});
+
+// ---- Config ----
+const PORT = process.env.PORT || 3000;
+
+// Almacenar conexiones activas por username
 const activeConnections = new Map();
 
-// Ruta principal
+// Healthcheck / estado
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'Server running', 
-        message: 'TikTok Live Chat Reader Backend',
-        activeConnections: activeConnections.size
-    });
+  res.json({
+    status: 'Server running',
+    message: 'TikTok Live Chat Reader Backend',
+    activeConnections: activeConnections.size
+  });
 });
 
-// Endpoint para verificar si un usuario está en vivo
+// ---------- API: verificar si un usuario está en vivo ----------
 app.post('/api/check-live', async (req, res) => {
-    const { username } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    try {
-        // Intentar conectar para verificar si está en vivo
-        const tiktokConnection = new WebcastPushConnection(username, {
-            enableExtendedGiftInfo: true
-        });
-        
-        await tiktokConnection.connect();
-        
-        // Si llegamos aquí, está en vivo
-        res.json({ 
-            isLive: true, 
-            username: username,
-            message: 'Usuario está en vivo'
-        });
-        
-        // Desconectar inmediatamente, solo era para verificar
-        tiktokConnection.disconnect();
-        
-    } catch (error) {
-        // Si falla, probablemente no está en vivo
-        res.json({ 
-            isLive: false, 
-            username: username,
-            message: 'Usuario NO está en vivo o el username es incorrecto',
-            error: error.message
-        });
-    }
-});
+  const { username } = req.body;
 
-// Endpoint para iniciar conexión al chat
-app.post('/api/start-chat', async (req, res) => {
-    const { username } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    // Verificar si ya existe una conexión para este usuario
-    if (activeConnections.has(username)) {
-        return res.json({ 
-            success: true, 
-            message: 'Ya existe una conexión activa para este usuario',
-            username: username
-        });
-    }
-    
-    try {
-        const tiktokConnection = new WebcastPushConnection(username, {
-            enableExtendedGiftInfo: true,
-            enableWebsocketUpgrade: true,
-            requestPollingIntervalMs: 1000
-        });
-        
-        // Guardar la conexión
-        activeConnections.set(username, tiktokConnection);
-        
-        // Evento: Conectado
-        tiktokConnection.connect().then(state => {
-            console.log(`✅ Conectado a @${state.roomInfo.owner.uniqueId}`);
-            io.emit('tiktok-status', {
-                type: 'connected',
-                username: username,
-                roomInfo: {
-                    title: state.roomInfo.title,
-                    viewers: state.roomInfo.userCount
-                }
-            });
-        }).catch(err => {
-            console.error('❌ Error al conectar:', err);
-            activeConnections.delete(username);
-            io.emit('tiktok-status', {
-                type: 'error',
-                username: username,
-                error: err.message
-            });
-        });
-        
-        // Evento: Nuevo mensaje de chat
-        tiktokConnection.on('chat', data => {
-            const message = {
-                username: data.uniqueId,
-                nickname: data.nickname,
-                message: data.comment,
-                timestamp: new Date().toISOString(),
-                profilePicture: data.profilePictureUrl
-            };
-            
-            console.log(`💬 ${data.uniqueId}: ${data.comment}`);
-            io.emit('tiktok-message', message);
-        });
-        
-        // Evento: Usuario se une
-        tiktokConnection.on('member', data => {
-            const joinMessage = {
-                username: data.uniqueId,
-                nickname: data.nickname,
-                message: '¡Se unió al stream!',
-                timestamp: new Date().toISOString(),
-                type: 'join'
-            };
-            
-            console.log(`👋 ${data.uniqueId} se unió`);
-            io.emit('tiktok-join', joinMessage);
-        });
-        
-        // Evento: Like
-        tiktokConnection.on('like', data => {
-            const likeMessage = {
-                username: data.uniqueId,
-                nickname: data.nickname,
-                likeCount: data.likeCount,
-                totalLikes: data.totalLikeCount,
-                timestamp: new Date().toISOString(),
-                type: 'like'
-            };
-            
-            console.log(`❤️ ${data.uniqueId} dio ${data.likeCount} likes`);
-            io.emit('tiktok-like', likeMessage);
-        });
-        
-        // Evento: Regalo
-        tiktokConnection.on('gift', data => {
-            const giftMessage = {
-                username: data.uniqueId,
-                nickname: data.nickname,
-                giftName: data.giftName,
-                giftCount: data.repeatCount,
-                diamondValue: data.diamondCount,
-                timestamp: new Date().toISOString(),
-                type: 'gift'
-            };
-            
-            console.log(`🎁 ${data.uniqueId} envió ${data.repeatCount}x ${data.giftName}`);
-            io.emit('tiktok-gift', giftMessage);
-        });
-        
-        // Evento: Share
-        tiktokConnection.on('share', data => {
-            const shareMessage = {
-                username: data.uniqueId,
-                nickname: data.nickname,
-                timestamp: new Date().toISOString(),
-                type: 'share'
-            };
-            
-            console.log(`🔄 ${data.uniqueId} compartió el stream`);
-            io.emit('tiktok-share', shareMessage);
-        });
-        
-        // Evento: Follow
-        tiktokConnection.on('follow', data => {
-            const followMessage = {
-                username: data.uniqueId,
-                nickname: data.nickname,
-                timestamp: new Date().toISOString(),
-                type: 'follow'
-            };
-            
-            console.log(`⭐ ${data.uniqueId} te siguió`);
-            io.emit('tiktok-follow', followMessage);
-        });
-        
-        // Evento: Stream terminado
-        tiktokConnection.on('streamEnd', () => {
-            console.log('🔴 El stream ha terminado');
-            io.emit('tiktok-status', {
-                type: 'ended',
-                username: username,
-                message: 'El stream ha terminado'
-            });
-            activeConnections.delete(username);
-        });
-        
-        // Evento: Desconectado
-        tiktokConnection.on('disconnected', () => {
-            console.log('⚠️ Desconectado del stream');
-            io.emit('tiktok-status', {
-                type: 'disconnected',
-                username: username
-            });
-            activeConnections.delete(username);
-        });
-        
-        res.json({ 
-            success: true, 
-            message: 'Conexión iniciada',
-            username: username
-        });
-        
-    } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ 
-            error: error.message 
-        });
-    }
-});
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
 
-// Endpoint para detener conexión
-app.post('/api/stop-chat', (req, res) => {
-    const { username } = req.body;
-    
-    if (!username) {
-        return res.status(400).json({ error: 'Username is required' });
-    }
-    
-    const connection = activeConnections.get(username);
-    
-    if (connection) {
-        connection.disconnect();
-        activeConnections.delete(username);
-        
-        io.emit('tiktok-status', {
-            type: 'stopped',
-            username: username
-        });
-        
-        res.json({ 
-            success: true, 
-            message: 'Conexión detenida',
-            username: username
-        });
-    } else {
-        res.json({ 
-            success: false, 
-            message: 'No hay conexión activa para este usuario'
-        });
-    }
-});
-
-// WebSocket - cuando un cliente se conecta
-io.on('connection', (socket) => {
-    console.log('🔌 Cliente conectado:', socket.id);
-    
-    socket.on('disconnect', () => {
-        console.log('❌ Cliente desconectado:', socket.id);
+  try {
+    const tiktokConnection = new WebcastPushConnection(username, {
+      enableExtendedGiftInfo: true
     });
+
+    await tiktokConnection.connect();
+
+    // Si conectó, está en vivo
+    res.json({
+      isLive: true,
+      username,
+      message: 'Usuario está en vivo'
+    });
+
+    // Desconectar (solo era verificación)
+    tiktokConnection.disconnect();
+  } catch (error) {
+    // Si falla la conexión, lo más probable es que no esté en vivo
+    res.json({
+      isLive: false,
+      username,
+      message: 'Usuario NO está en vivo o el username es incorrecto',
+      error: error.message
+    });
+  }
 });
 
-// Iniciar servidor
-http.listen(PORT, () => {
-    console.log(`
-    ╔════════════════════════════════════════╗
-    ║   🎵 TikTok Live Chat Server          ║
-    ║   Servidor corriendo en puerto ${PORT}   ║
-    ╚════════════════════════════════════════╝
-    `);
+// ---------- API: iniciar conexión al chat de un usuario ----------
+app.post('/api/start-chat', async (req, res) => {
+  const { username } = req.body;
+
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+
+  // Si ya existe, no abras otra
+  if (activeConnections.has(username)) {
+    return res.json({
+      success: true,
+      message: 'Ya existe una conexión activa para este usuario',
+      username
+    });
+  }
+
+  try {
+    const tiktokConnection = new WebcastPushConnection(username, {
+      enableExtendedGiftInfo: true,
+      enableWebsocketUpgrade: true,
+      requestPollingIntervalMs: 1000
+    });
+
+    // Guarda conexión
+    activeConnections.set(username, tiktokConnection);
+
+    // ----- Eventos TikTok -----
+    tiktokConnection
+      .connect()
+      .then((state) => {
+        console.log(`✅ Conectado a sala @${state.roomInfo?.owner?.uniqueId || username}`);
+        io.emit('tiktok-status', {
+          type: 'connected',
+          username,
+          roomInfo: {
+            title: state.roomInfo?.title,
+            viewers: state.roomInfo?.userCount
+          }
+        });
+      })
+      .catch((err) => {
+        console.error('❌ Error al conectar:', err);
+        activeConnections.delete(username);
+        io.emit('tiktok-status', {
+          type: 'error',
+          username,
+          error: err.message
+        });
+      });
+
+    // Mensajes de chat
+    tiktokConnection.on('chat', (data) => {
+      const message = {
+        username: data.uniqueId,
+        nickname: data.nickname,
+        message: data.comment,
+        timestamp: new Date().toISOString(),
+        profilePicture: data.profilePictureUrl
+      };
+      console.log(`💬 ${data.uniqueId}: ${data.comment}`);
+      io.emit('tiktok-message', message);
+    });
+
+    // Usuario se une
+    tiktokConnection.on('member', (data) => {
+      const joinMessage = {
+        username: data.uniqueId,
+        nickname: data.nickname,
+        message: '¡Se unió al stream!',
+        timestamp: new Date().toISOString(),
+        type: 'join'
+      };
+      console.log(`👋 ${data.uniqueId} se unió`);
+      io.emit('tiktok-join', joinMessage);
+    });
+
+    // Likes
+    tiktokConnection.on('like', (data) => {
+      const likeMessage = {
+        username: data.uniqueId,
+        nickname: data.nickname,
+        likeCount: data.likeCount,
+        totalLikes: data.totalLikeCount,
+        timestamp: new Date().toISOString(),
+        type: 'like'
+      };
+      console.log(`❤️ ${data.uniqueId} dio ${data.likeCount} likes`);
+      io.emit('tiktok-like', likeMessage);
+    });
+
+    // Regalos
+    tiktokConnection.on('gift', (data) => {
+      const giftMessage = {
+        username: data.uniqueId,
+        nickname: data.nickname,
+        giftName: data.giftName,
+        giftCount: data.repeatCount,
+        diamondValue: data.diamondCount,
+        timestamp: new Date().toISOString(),
+        type: 'gift'
+      };
+      console.log(`🎁 ${data.uniqueId} envió ${data.repeatCount}x ${data.giftName}`);
+      io.emit('tiktok-gift', giftMessage);
+    });
+
+    // Compartir
+    tiktokConnection.on('share', (data) => {
+      const shareMessage = {
+        username: data.uniqueId,
+        nickname: data.nickname,
+        timestamp: new Date().toISOString(),
+        type: 'share'
+      };
+      console.log(`🔄 ${data.uniqueId} compartió el stream`);
+      io.emit('tiktok-share', shareMessage);
+    });
+
+    // Follow
+    tiktokConnection.on('follow', (data) => {
+      const followMessage = {
+        username: data.uniqueId,
+        nickname: data.nickname,
+        timestamp: new Date().toISOString(),
+        type: 'follow'
+      };
+      console.log(`⭐ ${data.uniqueId} te siguió`);
+      io.emit('tiktok-follow', followMessage);
+    });
+
+    // Stream termina
+    tiktokConnection.on('streamEnd', () => {
+      console.log('🔴 El stream ha terminado');
+      io.emit('tiktok-status', {
+        type: 'ended',
+        username,
+        message: 'El stream ha terminado'
+      });
+      activeConnections.delete(username);
+    });
+
+    // Desconectado
+    tiktokConnection.on('disconnected', () => {
+      console.log('⚠️ Desconectado del stream');
+      io.emit('tiktok-status', {
+        type: 'disconnected',
+        username
+      });
+      activeConnections.delete(username);
+    });
+
+    return res.json({
+      success: true,
+      message: 'Conexión iniciada',
+      username
+    });
+  } catch (error) {
+    console.error('Error:', error);
+    return res.status(500).json({ error: error.message });
+  }
 });
 
-// Manejo de errores
+// ---------- API: detener conexión ----------
+app.post('/api/stop-chat', (req, res) => {
+  const { username } = req.body;
+
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+
+  const connection = activeConnections.get(username);
+
+  if (connection) {
+    connection.disconnect();
+    activeConnections.delete(username);
+
+    io.emit('tiktok-status', {
+      type: 'stopped',
+      username
+    });
+
+    return res.json({
+      success: true,
+      message: 'Conexión detenida',
+      username
+    });
+  } else {
+    return res.json({
+      success: false,
+      message: 'No hay conexión activa para este usuario'
+    });
+  }
+});
+
+// ---------- Socket.IO: conexión de clientes ----------
+io.on('connection', (socket) => {
+  console.log('🔌 Cliente conectado:', socket.id);
+
+  socket.on('disconnect', () => {
+    console.log('❌ Cliente desconectado:', socket.id);
+  });
+});
+
+// ---------- Iniciar servidor HTTP (¡no uses app.listen en Render!) ----------
+server.listen(PORT, () => {
+  console.log(`
+  ╔════════════════════════════════════════╗
+  ║   🎵 TikTok Live Chat Server          ║
+  ║   Servidor corriendo en puerto ${PORT}   ║
+  ╚════════════════════════════════════════╝
+  `);
+});
+
+// Cierre limpio
+process.on('SIGTERM', () => {
+  console.log('Recibido SIGTERM. Cerrando servidor...');
+  server.close(() => process.exit(0));
+});
+
 process.on('unhandledRejection', (error) => {
-    console.error('Error no manejado:', error);
+  console.error('Error no manejado:', error);
 });
